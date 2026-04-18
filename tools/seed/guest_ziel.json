@@ -1,0 +1,6 @@
+{
+  "guestId": { "S": "guest_ziel" },
+  "displayName": { "S": "Ziel" },
+  "sortOrder": { "N": "9" },
+  "active": { "BOOL": true }
+}

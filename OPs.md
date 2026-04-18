@@ -93,7 +93,9 @@ From repo root (PowerShell):
   -Region us-east-2
 ```
 
-Re-running put-items **overwrites** the same keys (idempotent for sample data).
+Re-running put-items **overwrites** the same `guestId` / `preferenceId` keys. Rows with **old** IDs that no longer exist under [`tools/seed/`](tools/seed/) are **not** deleted for you—clean those up in the DynamoDB console if needed. If someone had claimed a removed guest, clear `claimedBySub` and fix their `UserData` profile.
+
+The cabin roster and stable `guestId` values are documented in [`tools/seed/README.md`](tools/seed/README.md).
 
 ---
 
@@ -208,5 +210,6 @@ Confirm S3 bucket empty if delete fails on bucket retention. DynamoDB tables in 
 | Date | Who | Change |
 |------|-----|--------|
 | 2026-04-18 | — | Initial `OPs.md` runbook created. |
+| 2026-04-18 | — | Cabin guest seed roster updated to trip list (`tools/seed/`). |
 
 _Add a row here whenever you change parameters, domains, or deployment procedure._

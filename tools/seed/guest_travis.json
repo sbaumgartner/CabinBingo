@@ -1,0 +1,6 @@
+{
+  "guestId": { "S": "guest_travis" },
+  "displayName": { "S": "Travis" },
+  "sortOrder": { "N": "12" },
+  "active": { "BOOL": true }
+}
