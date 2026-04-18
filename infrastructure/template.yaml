@@ -1,0 +1,262 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: CabinBingo — Cognito, DynamoDB, Lambda (.NET 10) HTTP API, SPA bucket + CloudFront (us-east-2).
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Architectures:
+      - x86_64
+
+Parameters:
+  SpaCallbackUrl:
+    Type: String
+    Description: OAuth redirect URI for the SPA (include trailing slash if your app expects it).
+    Default: http://localhost:5173/callback
+  SpaLogoutUrl:
+    Type: String
+    Description: Post-logout redirect for Hosted UI.
+    Default: http://localhost:5173/
+  CognitoDomainPrefix:
+    Type: String
+    Description: Globally-unique prefix for the Cognito hosted domain ({prefix}.auth.us-east-2.amazoncognito.com).
+    Default: cabinbingo-demo
+  CorsOrigin1:
+    Type: String
+    Description: Allowed browser origin for API CORS (e.g. CloudFront URL or http://localhost:5173).
+    Default: http://localhost:5173
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${AWS::StackName}-users
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: false
+          RequireNumbers: true
+          RequireSymbols: false
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub ${AWS::StackName}-spa
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      SupportedIdentityProviders:
+        - COGNITO
+      CallbackURLs:
+        - !Ref SpaCallbackUrl
+      LogoutURLs:
+        - !Ref SpaLogoutUrl
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub ${CognitoDomainPrefix}-${AWS::StackName}
+      UserPoolId: !Ref UserPool
+
+  CabinGuestsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: guestId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: guestId
+          KeyType: HASH
+
+  PreferenceCatalogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: preferenceId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: preferenceId
+          KeyType: HASH
+
+  UserDataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowCredentials: false
+        AllowHeaders:
+          - "*"
+        AllowMethods:
+          - GET
+          - PUT
+          - POST
+          - OPTIONS
+        AllowOrigins:
+          - !Ref CorsOrigin1
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: dotnetcli
+      BuildProperties:
+        TargetFramework: net10.0
+    Properties:
+      Handler: CabinBingo.Api
+      Runtime: dotnet10
+      CodeUri: ../src/CabinBingo.Api/
+      Environment:
+        Variables:
+          CabinBingo__CabinGuestsTable: !Ref CabinGuestsTable
+          CabinBingo__PreferenceCatalogTable: !Ref PreferenceCatalogTable
+          CabinBingo__UserDataTable: !Ref UserDataTable
+          CabinBingo__CognitoAuthority: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+          CabinBingo__CognitoAudience: !Ref UserPoolClient
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CabinGuestsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PreferenceCatalogTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UserDataTable
+      Events:
+        RootAny:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /
+            Method: ANY
+        ProxyAny:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /{proxy+}
+            Method: ANY
+
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-spa-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2and3
+        DefaultRootObject: index.html
+        Origins:
+          - Id: spa-s3
+            DomainName: !GetAtt WebsiteBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+            OriginAccessControlId: !Ref CloudFrontOAC
+        DefaultCacheBehavior:
+          TargetOriginId: spa-s3
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${WebsiteBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}
+
+Outputs:
+  HttpApiUrl:
+    Description: Invoke URL for the HTTP API (append paths like /health).
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  CognitoIssuer:
+    Description: JWT issuer / OIDC authority for the SPA and API.
+    Value: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+  CognitoHostedUiBaseUrl:
+    Description: Cognito hosted domain base (login UI lives under this host).
+    Value: !Sub https://${CognitoDomainPrefix}-${AWS::StackName}.auth.${AWS::Region}.amazoncognito.com
+  WebsiteBucketName:
+    Value: !Ref WebsiteBucket
+  CloudFrontDistributionId:
+    Value: !Ref CloudFrontDistribution
+  CloudFrontDomainName:
+    Description: SPA URL (https).
+    Value: !GetAtt CloudFrontDistribution.DomainName

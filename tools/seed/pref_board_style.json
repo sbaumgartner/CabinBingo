@@ -1,0 +1,14 @@
+{
+  "preferenceId": { "S": "board_style" },
+  "question": { "S": "What style of board games do you prefer?" },
+  "answerType": { "S": "multi" },
+  "sortOrder": { "N": "3" },
+  "active": { "BOOL": true },
+  "options": {
+    "L": [
+      { "M": { "value": { "S": "Light" }, "label": { "S": "Light" } } },
+      { "M": { "value": { "S": "Medium" }, "label": { "S": "Medium" } } },
+      { "M": { "value": { "S": "Heavy" }, "label": { "S": "Heavy" } } }
+    ]
+  }
+}

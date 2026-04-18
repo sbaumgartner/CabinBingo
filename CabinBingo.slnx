@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CabinBingo.Api/CabinBingo.Api.csproj" />
+  </Folder>
+</Solution>

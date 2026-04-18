@@ -1,0 +1,15 @@
+version = 0.1
+
+[default.global.parameters]
+region = "us-east-2"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+stack_name = "cabinbingo"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+parameter_overrides = "SpaCallbackUrl=http://localhost:5173/callback SpaLogoutUrl=http://localhost:5173/ CognitoDomainPrefix=cabinbingo-demo CorsOrigin1=http://localhost:5173"

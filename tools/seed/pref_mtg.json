@@ -1,0 +1,13 @@
+{
+  "preferenceId": { "S": "mtg" },
+  "question": { "S": "Do you plan to play Magic: The Gathering at the cabin?" },
+  "answerType": { "S": "single" },
+  "sortOrder": { "N": "2" },
+  "active": { "BOOL": true },
+  "options": {
+    "L": [
+      { "M": { "value": { "S": "Yes" }, "label": { "S": "Yes" } } },
+      { "M": { "value": { "S": "No" }, "label": { "S": "No" } } }
+    ]
+  }
+}

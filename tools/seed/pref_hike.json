@@ -1,0 +1,13 @@
+{
+  "preferenceId": { "S": "hike" },
+  "question": { "S": "Do you plan to hike while at the cabin?" },
+  "answerType": { "S": "single" },
+  "sortOrder": { "N": "5" },
+  "active": { "BOOL": true },
+  "options": {
+    "L": [
+      { "M": { "value": { "S": "Yes" }, "label": { "S": "Yes" } } },
+      { "M": { "value": { "S": "No" }, "label": { "S": "No" } } }
+    ]
+  }
+}
