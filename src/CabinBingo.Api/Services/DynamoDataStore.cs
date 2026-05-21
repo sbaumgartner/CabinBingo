@@ -1,5 +1,6 @@
 using Amazon.DynamoDBv2;
 using Amazon.DynamoDBv2.Model;
+using CabinBingo.Api.Models;
 using CabinBingo.Api.Options;
 
 namespace CabinBingo.Api.Services;
@@ -17,6 +18,7 @@ public sealed class DynamoDataStore
 
     private static string UserPk(string sub) => $"USER#{sub}";
     private const string ProfileSk = "PROFILE";
+    private const string BingoActiveSk = "BINGO#ACTIVE";
 
     public async Task<IReadOnlyList<GuestRow>> ScanGuestsAsync(CancellationToken ct)
     {
@@ -30,7 +32,7 @@ public sealed class DynamoDataStore
             }
         }, ct);
 
-        return resp.Items.Select(GuestRow.FromItem).Where(g => g is not null).Cast<GuestRow>().OrderBy(g => g.SortOrder).ToList();
+        return (resp.Items ?? []).Select(GuestRow.FromItem).Where(g => g is not null).Cast<GuestRow>().OrderBy(g => g.SortOrder).ToList();
     }
 
     public async Task<GuestRow?> GetGuestAsync(string guestId, CancellationToken ct)
@@ -45,7 +47,7 @@ public sealed class DynamoDataStore
             ConsistentRead = true
         }, ct);
 
-        return resp.Item.Count == 0 ? null : GuestRow.FromItem(resp.Item);
+        return resp.Item is null || resp.Item.Count == 0 ? null : GuestRow.FromItem(resp.Item);
     }
 
     public async Task<ProfileRow?> GetProfileAsync(string sub, CancellationToken ct)
@@ -61,7 +63,32 @@ public sealed class DynamoDataStore
             ConsistentRead = true
         }, ct);
 
-        return resp.Item.Count == 0 ? null : ProfileRow.FromItem(resp.Item);
+        return resp.Item is null || resp.Item.Count == 0 ? null : ProfileRow.FromItem(resp.Item);
+    }
+
+    public async Task<PersistedBingoState?> GetBingoStateAsync(string sub, CancellationToken ct)
+    {
+        var resp = await _ddb.GetItemAsync(new GetItemRequest
+        {
+            TableName = _opt.UserDataTable,
+            Key = new Dictionary<string, AttributeValue>
+            {
+                ["PK"] = new AttributeValue { S = UserPk(sub) },
+                ["SK"] = new AttributeValue { S = BingoActiveSk }
+            },
+            ConsistentRead = true
+        }, ct);
+
+        return resp.Item is null || resp.Item.Count == 0 ? null : PersistedBingoState.FromItem(resp.Item);
+    }
+
+    public async Task PutBingoStateAsync(string sub, PersistedBingoState state, CancellationToken ct)
+    {
+        await _ddb.PutItemAsync(new PutItemRequest
+        {
+            TableName = _opt.UserDataTable,
+            Item = state.ToItem(UserPk(sub), BingoActiveSk)
+        }, ct);
     }
 
     public async Task ClaimGuestAsync(string sub, string newGuestId, CancellationToken ct)
@@ -149,7 +176,7 @@ public sealed class DynamoDataStore
             await _ddb.TransactWriteItemsAsync(new TransactWriteItemsRequest
             {
                 TransactItems = transact,
-                ClientRequestToken = $"{sub}:{newGuestId}:{Guid.NewGuid():N}"
+                ClientRequestToken = Guid.NewGuid().ToString("N")
             }, ct);
         }
         catch (TransactionCanceledException)
@@ -189,7 +216,7 @@ public sealed class DynamoDataStore
             }
         }, ct);
 
-        return resp.Items.Select(PreferenceCatalogRow.FromItem).Where(p => p is not null).Cast<PreferenceCatalogRow>()
+        return (resp.Items ?? []).Select(PreferenceCatalogRow.FromItem).Where(p => p is not null).Cast<PreferenceCatalogRow>()
             .OrderBy(p => p.SortOrder).ToList();
     }
 
@@ -208,7 +235,7 @@ public sealed class DynamoDataStore
         }, ct);
 
         var dict = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        foreach (var item in resp.Items)
+        foreach (var item in resp.Items ?? [])
         {
             if (!item.TryGetValue("SK", out var sk)) continue;
             var skv = sk.S;
@@ -223,6 +250,8 @@ public sealed class DynamoDataStore
 
     public async Task PutAnswersAsync(string sub, IReadOnlyDictionary<string, IReadOnlyList<string>> answers, CancellationToken ct)
     {
+        var existing = await GetAnswersAsync(sub, ct);
+
         // Simple approach: write each answer as its own Put (no transaction across many - acceptable for v1)
         foreach (var (prefId, values) in answers)
         {
@@ -238,22 +267,128 @@ public sealed class DynamoDataStore
                 }
             }, ct);
         }
+
+        foreach (var stalePrefId in existing.Keys.Except(answers.Keys, StringComparer.OrdinalIgnoreCase))
+        {
+            await _ddb.DeleteItemAsync(new DeleteItemRequest
+            {
+                TableName = _opt.UserDataTable,
+                Key = new Dictionary<string, AttributeValue>
+                {
+                    ["PK"] = new AttributeValue { S = UserPk(sub) },
+                    ["SK"] = new AttributeValue { S = $"ANSWER#{stalePrefId}" }
+                }
+            }, ct);
+        }
     }
 
     public async Task<UserAnswersState> LoadAnswersStateAsync(string sub, CancellationToken ct)
     {
         var raw = await GetAnswersAsync(sub, ct);
         var s = new UserAnswersState();
+        if (raw.TryGetValue("clocktower", out var ctower) && ctower.Count > 0) s.Clocktower = ctower[0];
         if (raw.TryGetValue("drink", out var d) && d.Count > 0) s.Drink = d[0];
         if (raw.TryGetValue("mtg", out var m) && m.Count > 0) s.Mtg = m[0];
         if (raw.TryGetValue("hot_tub", out var h) && h.Count > 0) s.HotTub = h[0];
         if (raw.TryGetValue("hike", out var hi) && hi.Count > 0) s.Hike = hi[0];
-        if (raw.TryGetValue("board_style", out var bs))
-        {
-            foreach (var x in bs) s.BoardStyles.Add(x);
-        }
 
         return s;
+    }
+
+    public async Task<IReadOnlyList<AdminUserOverviewDto>> ScanAdminOverviewAsync(CancellationToken ct)
+    {
+        var items = new List<Dictionary<string, AttributeValue>>();
+        Dictionary<string, AttributeValue>? lastKey = null;
+        do
+        {
+            var resp = await _ddb.ScanAsync(new ScanRequest
+            {
+                TableName = _opt.UserDataTable,
+                ExclusiveStartKey = lastKey,
+                ProjectionExpression = "PK, SK, guestId, guestDisplayName, generatedAt, markedCard1, markedCard2, card1, card2"
+            }, ct);
+
+            if (resp.Items is { Count: > 0 })
+            {
+                items.AddRange(resp.Items);
+            }
+
+            lastKey = resp.LastEvaluatedKey is { Count: > 0 } next ? next : null;
+        } while (lastKey is not null);
+
+        var users = new Dictionary<string, AdminUserAccumulator>(StringComparer.Ordinal);
+        foreach (var item in items)
+        {
+            if (!item.TryGetValue("PK", out var pkValue) || string.IsNullOrWhiteSpace(pkValue.S))
+            {
+                continue;
+            }
+
+            var pk = pkValue.S;
+            if (!pk.StartsWith("USER#", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!item.TryGetValue("SK", out var skValue) || string.IsNullOrWhiteSpace(skValue.S))
+            {
+                continue;
+            }
+
+            var sub = pk["USER#".Length..];
+            if (!users.TryGetValue(sub, out var acc))
+            {
+                acc = new AdminUserAccumulator(sub);
+                users[sub] = acc;
+            }
+
+            switch (skValue.S)
+            {
+                case ProfileSk:
+                    acc.HasProfile = true;
+                    acc.GuestId = item.TryGetValue("guestId", out var guestId) ? guestId.S : null;
+                    acc.GuestDisplayName = item.TryGetValue("guestDisplayName", out var guestName) ? guestName.S : null;
+                    break;
+                case BingoActiveSk:
+                    acc.HasBingoCards = true;
+                    acc.BingoGeneratedAt = item.TryGetValue("generatedAt", out var generatedAt) ? generatedAt.S : null;
+                    acc.Card1MarkedCount = CountMarked(item, "markedCard1");
+                    acc.Card2MarkedCount = CountMarked(item, "markedCard2");
+                    acc.Card1TotalCount = CountCells(item, "card1");
+                    acc.Card2TotalCount = CountCells(item, "card2");
+                    break;
+            }
+        }
+
+        return users.Values
+            .OrderBy(u => u.GuestDisplayName ?? "~", StringComparer.OrdinalIgnoreCase)
+            .ThenBy(u => u.UserSub, StringComparer.Ordinal)
+            .Select(u => new AdminUserOverviewDto(
+                u.UserSub,
+                u.HasProfile,
+                u.GuestId,
+                u.GuestDisplayName,
+                u.HasBingoCards,
+                u.BingoGeneratedAt,
+                u.Card1MarkedCount,
+                u.Card2MarkedCount,
+                u.Card1TotalCount,
+                u.Card2TotalCount))
+            .ToList();
+    }
+
+    private static int CountMarked(Dictionary<string, AttributeValue> item, string attributeName)
+    {
+        return item.TryGetValue(attributeName, out var value) && value.L is { } values
+            ? values.Count(v => v.BOOL ?? false)
+            : 0;
+    }
+
+    private static int CountCells(Dictionary<string, AttributeValue> item, string attributeName)
+    {
+        return item.TryGetValue(attributeName, out var value) && value.L is { } values
+            ? values.Count
+            : 0;
     }
 }
 
@@ -309,4 +444,98 @@ public sealed record PreferenceCatalogRow(
 
         return new PreferenceCatalogRow(pid.S, q, at, options, sort);
     }
+}
+
+public sealed record PersistedBingoState(
+    string Seed,
+    string GeneratedAt,
+    BingoCardDto Card1,
+    BingoCardDto Card2,
+    IReadOnlyList<bool> MarkedCard1,
+    IReadOnlyList<bool> MarkedCard2)
+{
+    public Dictionary<string, AttributeValue> ToItem(string pk, string sk) =>
+        new()
+        {
+            ["PK"] = new AttributeValue { S = pk },
+            ["SK"] = new AttributeValue { S = sk },
+            ["seed"] = new AttributeValue { S = Seed },
+            ["generatedAt"] = new AttributeValue { S = GeneratedAt },
+            ["card1"] = new AttributeValue { L = Card1.Cells.Select(ToCellAttribute).ToList() },
+            ["card2"] = new AttributeValue { L = Card2.Cells.Select(ToCellAttribute).ToList() },
+            ["markedCard1"] = new AttributeValue { L = MarkedCard1.Select(v => new AttributeValue { BOOL = v }).ToList() },
+            ["markedCard2"] = new AttributeValue { L = MarkedCard2.Select(v => new AttributeValue { BOOL = v }).ToList() },
+            ["updatedAt"] = new AttributeValue { S = DateTimeOffset.UtcNow.ToString("O") }
+        };
+
+    public BingoStateResponse ToResponse() =>
+        new(Seed, GeneratedAt, Card1, Card2, MarkedCard1, MarkedCard2);
+
+    public static PersistedBingoState? FromItem(Dictionary<string, AttributeValue> item)
+    {
+        if (!item.TryGetValue("seed", out var seed)
+            || !item.TryGetValue("generatedAt", out var generatedAt)
+            || !item.TryGetValue("card1", out var card1)
+            || !item.TryGetValue("card2", out var card2)
+            || !item.TryGetValue("markedCard1", out var markedCard1)
+            || !item.TryGetValue("markedCard2", out var markedCard2))
+        {
+            return null;
+        }
+
+        return new PersistedBingoState(
+            seed.S,
+            generatedAt.S,
+            new BingoCardDto((card1.L ?? []).Select(FromCellAttribute).ToList()),
+            new BingoCardDto((card2.L ?? []).Select(FromCellAttribute).ToList()),
+            (markedCard1.L ?? []).Select(v => v.BOOL ?? false).ToList(),
+            (markedCard2.L ?? []).Select(v => v.BOOL ?? false).ToList());
+    }
+
+    private static AttributeValue ToCellAttribute(BingoCellDto cell) =>
+        new()
+        {
+            M = BuildCellMap(cell)
+        };
+
+    private static BingoCellDto FromCellAttribute(AttributeValue attribute)
+    {
+        var map = attribute.M ?? [];
+        var slotId = map.TryGetValue("slotId", out var slot) ? slot.S : "";
+        var text = map.TryGetValue("text", out var txt) ? txt.S : "";
+        var isFixedCenter = map.TryGetValue("isFixedCenter", out var center) && (center.BOOL ?? false);
+        var preferenceLabel = map.TryGetValue("preferenceLabel", out var label) ? label.S : null;
+        return new BingoCellDto(slotId, text, isFixedCenter, preferenceLabel);
+    }
+
+    private static Dictionary<string, AttributeValue> BuildCellMap(BingoCellDto cell)
+    {
+        var map = new Dictionary<string, AttributeValue>
+        {
+            ["slotId"] = new AttributeValue { S = cell.SlotId },
+            ["text"] = new AttributeValue { S = cell.Text },
+            ["isFixedCenter"] = new AttributeValue { BOOL = cell.IsFixedCenter }
+        };
+
+        if (!string.IsNullOrWhiteSpace(cell.PreferenceLabel))
+        {
+            map["preferenceLabel"] = new AttributeValue { S = cell.PreferenceLabel };
+        }
+
+        return map;
+    }
+}
+
+file sealed class AdminUserAccumulator(string userSub)
+{
+    public string UserSub { get; } = userSub;
+    public bool HasProfile { get; set; }
+    public string? GuestId { get; set; }
+    public string? GuestDisplayName { get; set; }
+    public bool HasBingoCards { get; set; }
+    public string? BingoGeneratedAt { get; set; }
+    public int Card1MarkedCount { get; set; }
+    public int Card2MarkedCount { get; set; }
+    public int Card1TotalCount { get; set; }
+    public int Card2TotalCount { get; set; }
 }

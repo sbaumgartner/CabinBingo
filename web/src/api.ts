@@ -13,7 +13,9 @@ export async function apiGet<T>(path: string): Promise<T> {
     headers: { ...(await authHeader()) },
   });
   if (!res.ok) throw new Error(`${path} failed: ${res.status} ${await res.text()}`);
-  return (await res.json()) as T;
+  const text = await res.text();
+  if (!text) return null as T;
+  return JSON.parse(text) as T;
 }
 
 export async function apiPutJson(path: string, body: unknown): Promise<void> {

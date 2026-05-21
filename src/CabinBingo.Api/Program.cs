@@ -147,17 +147,31 @@ app.MapPut("/preferences/me", async (HttpContext http, PutPreferencesRequest bod
         return Results.Unauthorized();
 
     var catalog = await store.ScanPreferenceCatalogAsync(ct);
+    var catalogIds = new HashSet<string>(catalog.Select(c => c.PreferenceId), StringComparer.OrdinalIgnoreCase);
+    var filteredAnswers = body.Answers
+        .Where(kvp => catalogIds.Contains(kvp.Key))
+        .ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.OrdinalIgnoreCase);
+
     try
     {
-        PreferenceAnswersValidator.ValidateOrThrow(body.Answers, catalog);
+        PreferenceAnswersValidator.ValidateOrThrow(filteredAnswers, catalog);
     }
     catch (InvalidOperationException ex)
     {
         return Results.BadRequest(new { message = ex.Message });
     }
 
-    await store.PutAnswersAsync(sub, body.Answers, ct);
+    await store.PutAnswersAsync(sub, filteredAnswers, ct);
     return Results.NoContent();
+}).RequireAuthorization();
+
+app.MapGet("/bingo/me", async (HttpContext http, DynamoDataStore store, CancellationToken ct) =>
+{
+    if (!TryGetSub(http, out var sub))
+        return Results.Unauthorized();
+
+    var state = await store.GetBingoStateAsync(sub, ct);
+    return Results.Json(state?.ToResponse());
 }).RequireAuthorization();
 
 app.MapPost("/bingo/cards", async (HttpContext http, PostBingoRequest? body, DynamoDataStore store, BingoService bingo, CancellationToken ct) =>
@@ -170,15 +184,83 @@ app.MapPost("/bingo/cards", async (HttpContext http, PostBingoRequest? body, Dyn
         return Results.BadRequest(new { message = "Complete your cabin guest profile before generating bingo cards." });
 
     var answers = await store.LoadAnswersStateAsync(sub, ct);
+    var guests = await store.ScanGuestsAsync(ct);
+    var existing = await store.GetBingoStateAsync(sub, ct);
+    if (existing is not null && !(body?.ReplaceExisting ?? false))
+        return Results.Conflict(new { message = "Generating new cards will replace your current cards and all marked progress." });
+
     try
     {
-        var cards = bingo.BuildTwoCards(sub, answers, body?.Seed);
-        return Results.Ok(cards);
+        var cards = bingo.BuildTwoCards(sub, profile.GuestId, answers, guests, body?.Seed);
+        var state = new PersistedBingoState(
+            body?.Seed ?? "",
+            DateTimeOffset.UtcNow.ToString("O"),
+            cards.Card1,
+            cards.Card2,
+            Enumerable.Repeat(false, cards.Card1.Cells.Count).ToArray(),
+            Enumerable.Repeat(false, cards.Card2.Cells.Count).ToArray());
+        await store.PutBingoStateAsync(sub, state, ct);
+        return Results.Ok(state.ToResponse());
     }
     catch (InvalidOperationException ex)
     {
         return Results.BadRequest(new { message = ex.Message });
     }
+}).RequireAuthorization();
+
+app.MapPut("/bingo/me", async (HttpContext http, PutBingoProgressRequest body, DynamoDataStore store, CancellationToken ct) =>
+{
+    if (!TryGetSub(http, out var sub))
+        return Results.Unauthorized();
+
+    if (body.MarkedCard1.Count != 25 || body.MarkedCard2.Count != 25)
+        return Results.BadRequest(new { message = "Both marked card arrays must contain exactly 25 values." });
+
+    var existing = await store.GetBingoStateAsync(sub, ct);
+    if (existing is null)
+        return Results.BadRequest(new { message = "Generate bingo cards before saving bingo progress." });
+
+    var updated = existing with
+    {
+        MarkedCard1 = body.MarkedCard1.ToArray(),
+        MarkedCard2 = body.MarkedCard2.ToArray()
+    };
+
+    await store.PutBingoStateAsync(sub, updated, ct);
+    return Results.NoContent();
+}).RequireAuthorization();
+
+app.MapGet("/admin/overview", async (HttpContext http, DynamoDataStore store, CancellationToken ct) =>
+{
+    if (!TryGetSub(http, out _))
+        return Results.Unauthorized();
+
+    var overview = await store.ScanAdminOverviewAsync(ct);
+    return Results.Ok(overview);
+}).RequireAuthorization();
+
+app.MapGet("/admin/users/{userSub}/bingo", async (HttpContext http, string userSub, DynamoDataStore store, CancellationToken ct) =>
+{
+    if (!TryGetSub(http, out _))
+        return Results.Unauthorized();
+
+    if (string.IsNullOrWhiteSpace(userSub))
+        return Results.BadRequest(new { message = "userSub is required." });
+
+    var bingo = await store.GetBingoStateAsync(userSub, ct);
+    if (bingo is null)
+        return Results.NotFound(new { message = "No active bingo cards found for that user." });
+
+    var profile = await store.GetProfileAsync(userSub, ct);
+    return Results.Ok(new AdminUserBingoDetailResponse(
+        userSub,
+        profile?.GuestId,
+        profile?.GuestDisplayName,
+        bingo.GeneratedAt,
+        bingo.Card1,
+        bingo.Card2,
+        bingo.MarkedCard1,
+        bingo.MarkedCard2));
 }).RequireAuthorization();
 
 app.Run();

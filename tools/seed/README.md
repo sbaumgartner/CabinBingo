@@ -17,7 +17,6 @@ Each `guest_*.json` file is a DynamoDB `PutItem` payload for the **CabinGuests**
 | `guest_ziel` | Ziel |
 | `guest_marissa_bang` | marissa! |
 | `guest_movie` | Movie |
-| `guest_travis` | Travis |
 | `guest_evan` | Evan |
 | `guest_hannah` | Hannah |
 | `guest_jim` | Jim |

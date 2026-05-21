@@ -5,9 +5,9 @@ namespace CabinBingo.Api.Services;
 /// </summary>
 public sealed class UserAnswersState
 {
+    public string? Clocktower { get; set; }
     public string? Drink { get; set; }
     public string? Mtg { get; set; }
-    public HashSet<string> BoardStyles { get; } = new(StringComparer.OrdinalIgnoreCase);
     public string? HotTub { get; set; }
     public string? Hike { get; set; }
 

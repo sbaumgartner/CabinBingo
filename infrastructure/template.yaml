@@ -26,6 +26,21 @@ Parameters:
     Type: String
     Description: Allowed browser origin for API CORS (e.g. CloudFront URL or http://localhost:5173).
     Default: http://localhost:5173
+  CustomDomainName:
+    Type: String
+    Description: Optional custom domain for the SPA CloudFront distribution.
+    Default: ""
+  CloudFrontCertificateArn:
+    Type: String
+    Description: Optional ACM certificate ARN in us-east-1 for the CloudFront custom domain.
+    Default: ""
+
+Conditions:
+  HasCustomDomain: !Not [!Equals [!Ref CustomDomainName, ""]]
+  HasCloudFrontCertificate: !Not [!Equals [!Ref CloudFrontCertificateArn, ""]]
+  UseCustomDomain: !And
+    - !Condition HasCustomDomain
+    - !Condition HasCloudFrontCertificate
 
 Resources:
   UserPool:
@@ -128,10 +143,6 @@ Resources:
 
   ApiFunction:
     Type: AWS::Serverless::Function
-    Metadata:
-      BuildMethod: dotnetcli
-      BuildProperties:
-        TargetFramework: net10.0
     Properties:
       Handler: CabinBingo.Api
       Runtime: dotnet10
@@ -193,12 +204,22 @@ Resources:
         Enabled: true
         HttpVersion: http2and3
         DefaultRootObject: index.html
+        Aliases: !If
+          - UseCustomDomain
+          - [!Ref CustomDomainName]
+          - !Ref AWS::NoValue
         Origins:
           - Id: spa-s3
             DomainName: !GetAtt WebsiteBucket.RegionalDomainName
             S3OriginConfig:
               OriginAccessIdentity: ""
             OriginAccessControlId: !Ref CloudFrontOAC
+        ViewerCertificate: !If
+          - UseCustomDomain
+          - AcmCertificateArn: !Ref CloudFrontCertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - !Ref AWS::NoValue
         DefaultCacheBehavior:
           TargetOriginId: spa-s3
           ViewerProtocolPolicy: redirect-to-https
@@ -239,6 +260,17 @@ Resources:
               StringEquals:
                 AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}
 
+  WebsiteCustomDomainRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: UseCustomDomain
+    Properties:
+      HostedZoneName: tidrafts.com.
+      Name: !Ref CustomDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+
 Outputs:
   HttpApiUrl:
     Description: Invoke URL for the HTTP API (append paths like /health).
@@ -260,3 +292,9 @@ Outputs:
   CloudFrontDomainName:
     Description: SPA URL (https).
     Value: !GetAtt CloudFrontDistribution.DomainName
+  WebsiteUrl:
+    Description: Preferred SPA URL.
+    Value: !If
+      - UseCustomDomain
+      - !Sub https://${CustomDomainName}
+      - !Sub https://${CloudFrontDistribution.DomainName}

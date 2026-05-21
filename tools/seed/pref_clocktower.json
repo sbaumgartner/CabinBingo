@@ -1,0 +1,13 @@
+{
+  "preferenceId": { "S": "clocktower" },
+  "question": { "S": "Do you plan to play Blood on the Clocktower at the cabin?" },
+  "answerType": { "S": "single" },
+  "sortOrder": { "N": "0" },
+  "active": { "BOOL": true },
+  "options": {
+    "L": [
+      { "M": { "value": { "S": "Yes" }, "label": { "S": "Yes" } } },
+      { "M": { "value": { "S": "No" }, "label": { "S": "No" } } }
+    ]
+  }
+}

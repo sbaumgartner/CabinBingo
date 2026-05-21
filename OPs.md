@@ -162,7 +162,7 @@ aws cloudfront create-invalidation --distribution-id CLOUDFRONT_DISTRIBUTION_ID 
 | 3 | **Sign in** via Cognito Hosted UI | Redirect to `/callback`, then home; no console OIDC errors |
 | 4 | **GET** guests (implicit after sign-in in UI) | Guest list appears (seeded names) |
 | 5 | **Claim** a guest | Success; name disappears for a second user |
-| 6 | **Save preferences** | All five preferences saved |
+| 6 | **Save preferences** | All four preferences saved |
 | 7 | **Generate bingo** | Two 5×5 grids; center cell is the fixed hug square |
 
 **Local UI against deployed API:** `CorsOrigin1` must include `http://localhost:5173` and Cognito app client must list `http://localhost:5173/callback` and logout URL (add in console or second parameter set).

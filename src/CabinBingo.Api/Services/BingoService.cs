@@ -8,6 +8,8 @@ public sealed class BingoService
 {
     public const string CenterSlotId = "CENTER_FIXED";
     public const string CenterText = "Give a fellow cabin member a hug";
+    private const int CardNonCenterCellCount = 24;
+    private const int MaxDuplicateSquaresAcrossCards = 5;
     private const int PreferredMaxAttendeeSquaresPerCard = 5;
     private const string ClocktowerLabel = "Blood on the Clocktower";
     private const string HikeLabel = "on a hike";
@@ -70,50 +72,115 @@ public sealed class BingoService
     {
         var eligible = Slots.Where(s => s.IsEligible(answers)).ToList();
         var attendeeSlots = BuildAttendeeSlots(currentGuestId, guests);
-        if (eligible.Count + attendeeSlots.Count < 24)
+        if (eligible.Count + attendeeSlots.Count < CardNonCenterCellCount)
         {
             throw new InvalidOperationException(
                 $"Not enough eligible bingo slots ({eligible.Count}) plus attendee squares ({attendeeSlots.Count}). Add more generic slots or more guests.");
+        }
+
+        var totalUniqueSlots = eligible.Count + attendeeSlots.Count;
+        var minimumRequiredUniqueSlots = (CardNonCenterCellCount * 2) - MaxDuplicateSquaresAcrossCards;
+        if (totalUniqueSlots < minimumRequiredUniqueSlots)
+        {
+            throw new InvalidOperationException(
+                $"Not enough unique bingo slots ({totalUniqueSlots}) to build two cards with at most {MaxDuplicateSquaresAcrossCards} duplicate squares. Add more generic slots or more guests.");
         }
 
         var seed = ComputeSeed(userSub, seedSuffix);
         var rng1 = new Random(seed);
         var rng2 = new Random(seed ^ 0x5EED1234);
 
+        var card1Slots = ChooseCardSlots(eligible, attendeeSlots, rng1);
+        var card2Slots = ChooseCardSlots(
+            eligible,
+            attendeeSlots,
+            rng2,
+            avoidSlotIds: card1Slots.Select(s => s.Id).ToHashSet(StringComparer.Ordinal),
+            maxOverlap: MaxDuplicateSquaresAcrossCards);
+
         return new BingoCardsResponse(
-            BuildCard(eligible, attendeeSlots, rng1),
-            BuildCard(eligible, attendeeSlots, rng2));
+            BuildCard(card1Slots),
+            BuildCard(card2Slots));
     }
 
-    private static BingoCardDto BuildCard(
+    private static List<BingoSlotDefinition> ChooseCardSlots(
         List<BingoSlotDefinition> eligible,
         List<BingoSlotDefinition> attendeeSlots,
-        Random rng)
+        Random rng,
+        HashSet<string>? avoidSlotIds = null,
+        int maxOverlap = int.MaxValue)
     {
-        var chosen = eligible.ToList();
+        var chosen = new List<BingoSlotDefinition>(CardNonCenterCellCount);
+        var overlapCount = 0;
 
-        Shuffle(chosen, rng);
-        if (chosen.Count > 24)
-        {
-            chosen = chosen.Take(24).ToList();
-        }
+        var eligiblePool = eligible.ToList();
+        Shuffle(eligiblePool, rng);
+        AddFromPool(eligiblePool, chosen, avoidSlotIds, ref overlapCount, maxOverlap);
 
-        if (chosen.Count < 24)
+        if (chosen.Count < CardNonCenterCellCount)
         {
             var attendeePool = attendeeSlots.ToList();
             Shuffle(attendeePool, rng);
-
-            var attendeeCount = Math.Min(
+            var attendeeTarget = Math.Min(
                 attendeePool.Count,
-                Math.Max(PreferredMaxAttendeeSquaresPerCard, 24 - chosen.Count));
-            chosen.AddRange(attendeePool.Take(attendeeCount));
+                Math.Max(PreferredMaxAttendeeSquaresPerCard, CardNonCenterCellCount - chosen.Count));
+            AddFromPool(attendeePool, chosen, avoidSlotIds, ref overlapCount, maxOverlap, attendeeTarget);
         }
 
-        if (chosen.Count < 24)
+        if (chosen.Count < CardNonCenterCellCount)
         {
-            throw new InvalidOperationException("Not enough bingo slots available to build a full card.");
+            var attendeePool = attendeeSlots.ToList();
+            Shuffle(attendeePool, rng);
+            AddFromPool(attendeePool, chosen, avoidSlotIds, ref overlapCount, maxOverlap);
         }
 
+        if (chosen.Count < CardNonCenterCellCount)
+        {
+            throw new InvalidOperationException(
+                $"Not enough bingo slots available to build a full card while keeping duplicates across both cards at {MaxDuplicateSquaresAcrossCards} or fewer.");
+        }
+
+        return chosen.Take(CardNonCenterCellCount).ToList();
+    }
+
+    private static void AddFromPool(
+        IEnumerable<BingoSlotDefinition> pool,
+        List<BingoSlotDefinition> chosen,
+        HashSet<string>? avoidSlotIds,
+        ref int overlapCount,
+        int maxOverlap,
+        int maxToAdd = int.MaxValue)
+    {
+        var added = 0;
+        foreach (var slot in pool)
+        {
+            if (chosen.Count >= CardNonCenterCellCount || added >= maxToAdd)
+            {
+                return;
+            }
+
+            if (chosen.Any(existing => string.Equals(existing.Id, slot.Id, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            var isOverlap = avoidSlotIds?.Contains(slot.Id) ?? false;
+            if (isOverlap && overlapCount >= maxOverlap)
+            {
+                continue;
+            }
+
+            chosen.Add(slot);
+            added++;
+            if (isOverlap)
+            {
+                overlapCount++;
+            }
+        }
+    }
+
+    private static BingoCardDto BuildCard(IReadOnlyList<BingoSlotDefinition> chosen)
+    {
         var cells = new BingoCellDto[25];
         var idx = 0;
         for (var i = 0; i < 25; i++)

@@ -17,15 +17,17 @@ $seed = Join-Path $root "tools\seed"
 
 Write-Host "Seeding guests -> $GuestsTable"
 Get-ChildItem $seed -Filter "guest_*.json" | ForEach-Object {
-  $uri = ([System.Uri](Resolve-Path $_.FullName)).AbsoluteUri
-  aws dynamodb put-item --region $Region --table-name $GuestsTable --item $uri | Out-Null
+  $resolved = (Resolve-Path -LiteralPath $_.FullName).Path
+  $fileArg = "file://" + ($resolved -replace "\\", "/")
+  aws dynamodb put-item --region $Region --table-name $GuestsTable --item $fileArg | Out-Null
   Write-Host "  $($_.Name)"
 }
 
 Write-Host "Seeding preferences -> $PreferencesTable"
 Get-ChildItem $seed -Filter "pref_*.json" | ForEach-Object {
-  $uri = ([System.Uri](Resolve-Path $_.FullName)).AbsoluteUri
-  aws dynamodb put-item --region $Region --table-name $PreferencesTable --item $uri | Out-Null
+  $resolved = (Resolve-Path -LiteralPath $_.FullName).Path
+  $fileArg = "file://" + ($resolved -replace "\\", "/")
+  aws dynamodb put-item --region $Region --table-name $PreferencesTable --item $fileArg | Out-Null
   Write-Host "  $($_.Name)"
 }
 
