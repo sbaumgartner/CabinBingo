@@ -9,8 +9,9 @@ public sealed class BingoService
     public const string CenterSlotId = "CENTER_FIXED";
     public const string CenterText = "Give a fellow cabin member a hug";
     private const int CardNonCenterCellCount = 24;
+    private const int SharedDuplicateSquaresAcrossCards = 5;
+    private const int UniqueSquaresPerCard = CardNonCenterCellCount - SharedDuplicateSquaresAcrossCards;
     private const int MaxDuplicateSquaresAcrossCards = 5;
-    private const int PreferredMaxAttendeeSquaresPerCard = 5;
     private const string ClocktowerLabel = "Blood on the Clocktower";
     private const string HikeLabel = "on a hike";
     private const string HotTubLabel = "hot tub";
@@ -87,95 +88,90 @@ public sealed class BingoService
         }
 
         var seed = ComputeSeed(userSub, seedSuffix);
-        var rng1 = new Random(seed);
-        var rng2 = new Random(seed ^ 0x5EED1234);
+        var poolRng = new Random(seed);
+        var card1Rng = new Random(seed ^ 0x13572468);
+        var card2Rng = new Random(seed ^ 0x5EED1234);
 
-        var card1Slots = ChooseCardSlots(eligible, attendeeSlots, rng1);
-        var card2Slots = ChooseCardSlots(
-            eligible,
-            attendeeSlots,
-            rng2,
-            avoidSlotIds: card1Slots.Select(s => s.Id).ToHashSet(StringComparer.Ordinal),
-            maxOverlap: MaxDuplicateSquaresAcrossCards);
+        var allSlots = eligible
+            .Concat(attendeeSlots)
+            .ToList();
+        Shuffle(allSlots, poolRng);
+
+        var selectedUniqueSlots = allSlots
+            .Take((CardNonCenterCellCount * 2) - SharedDuplicateSquaresAcrossCards)
+            .ToList();
+
+        var sharedSlots = selectedUniqueSlots
+            .Take(SharedDuplicateSquaresAcrossCards)
+            .ToList();
+        var remainingSlots = selectedUniqueSlots
+            .Skip(SharedDuplicateSquaresAcrossCards)
+            .ToList();
+
+        var card1Unique = new List<BingoSlotDefinition>(UniqueSquaresPerCard);
+        var card2Unique = new List<BingoSlotDefinition>(UniqueSquaresPerCard);
+
+        var attendeeRemaining = remainingSlots.Where(s => s.IsAttendee).ToList();
+        var standardRemaining = remainingSlots.Where(s => !s.IsAttendee).ToList();
+        Shuffle(attendeeRemaining, poolRng);
+        Shuffle(standardRemaining, poolRng);
+
+        DealBalanced(attendeeRemaining, card1Unique, card2Unique, poolRng);
+        DealBalanced(standardRemaining, card1Unique, card2Unique, poolRng);
+
+        if (card1Unique.Count != UniqueSquaresPerCard || card2Unique.Count != UniqueSquaresPerCard)
+        {
+            throw new InvalidOperationException("Unable to distribute bingo squares evenly across both cards.");
+        }
+
+        var card1Slots = sharedSlots.Concat(card1Unique).ToList();
+        var card2Slots = sharedSlots.Concat(card2Unique).ToList();
+        Shuffle(card1Slots, card1Rng);
+        Shuffle(card2Slots, card2Rng);
 
         return new BingoCardsResponse(
             BuildCard(card1Slots),
             BuildCard(card2Slots));
     }
 
-    private static List<BingoSlotDefinition> ChooseCardSlots(
-        List<BingoSlotDefinition> eligible,
-        List<BingoSlotDefinition> attendeeSlots,
-        Random rng,
-        HashSet<string>? avoidSlotIds = null,
-        int maxOverlap = int.MaxValue)
+    private static void DealBalanced(
+        IReadOnlyList<BingoSlotDefinition> pool,
+        List<BingoSlotDefinition> card1Unique,
+        List<BingoSlotDefinition> card2Unique,
+        Random rng)
     {
-        var chosen = new List<BingoSlotDefinition>(CardNonCenterCellCount);
-        var overlapCount = 0;
-
-        var eligiblePool = eligible.ToList();
-        Shuffle(eligiblePool, rng);
-        AddFromPool(eligiblePool, chosen, avoidSlotIds, ref overlapCount, maxOverlap);
-
-        if (chosen.Count < CardNonCenterCellCount)
-        {
-            var attendeePool = attendeeSlots.ToList();
-            Shuffle(attendeePool, rng);
-            var attendeeTarget = Math.Min(
-                attendeePool.Count,
-                Math.Max(PreferredMaxAttendeeSquaresPerCard, CardNonCenterCellCount - chosen.Count));
-            AddFromPool(attendeePool, chosen, avoidSlotIds, ref overlapCount, maxOverlap, attendeeTarget);
-        }
-
-        if (chosen.Count < CardNonCenterCellCount)
-        {
-            var attendeePool = attendeeSlots.ToList();
-            Shuffle(attendeePool, rng);
-            AddFromPool(attendeePool, chosen, avoidSlotIds, ref overlapCount, maxOverlap);
-        }
-
-        if (chosen.Count < CardNonCenterCellCount)
-        {
-            throw new InvalidOperationException(
-                $"Not enough bingo slots available to build a full card while keeping duplicates across both cards at {MaxDuplicateSquaresAcrossCards} or fewer.");
-        }
-
-        return chosen.Take(CardNonCenterCellCount).ToList();
-    }
-
-    private static void AddFromPool(
-        IEnumerable<BingoSlotDefinition> pool,
-        List<BingoSlotDefinition> chosen,
-        HashSet<string>? avoidSlotIds,
-        ref int overlapCount,
-        int maxOverlap,
-        int maxToAdd = int.MaxValue)
-    {
-        var added = 0;
+        var dealToCard1First = rng.Next(2) == 0;
         foreach (var slot in pool)
         {
-            if (chosen.Count >= CardNonCenterCellCount || added >= maxToAdd)
+            if (card1Unique.Count >= UniqueSquaresPerCard && card2Unique.Count >= UniqueSquaresPerCard)
             {
                 return;
             }
 
-            if (chosen.Any(existing => string.Equals(existing.Id, slot.Id, StringComparison.Ordinal)))
+            if (dealToCard1First)
             {
-                continue;
+                if (card1Unique.Count < UniqueSquaresPerCard)
+                {
+                    card1Unique.Add(slot);
+                }
+                else if (card2Unique.Count < UniqueSquaresPerCard)
+                {
+                    card2Unique.Add(slot);
+                }
+            }
+            else
+            {
+                if (card2Unique.Count < UniqueSquaresPerCard)
+                {
+                    card2Unique.Add(slot);
+                }
+                else if (card1Unique.Count < UniqueSquaresPerCard)
+                {
+                    card1Unique.Add(slot);
+                }
             }
 
-            var isOverlap = avoidSlotIds?.Contains(slot.Id) ?? false;
-            if (isOverlap && overlapCount >= maxOverlap)
-            {
-                continue;
-            }
-
-            chosen.Add(slot);
-            added++;
-            if (isOverlap)
-            {
-                overlapCount++;
-            }
+            dealToCard1First = !dealToCard1First;
         }
     }
 
@@ -208,7 +204,8 @@ public sealed class BingoService
                 $"play_with_{g.GuestId}",
                 $"Play a game with {g.DisplayName}",
                 _ => true,
-                null))
+                null,
+                true))
             .ToList();
     }
 
@@ -228,5 +225,10 @@ public sealed class BingoService
         }
     }
 
-    private sealed record BingoSlotDefinition(string Id, string Text, Func<UserAnswersState, bool> IsEligible, string? PreferenceLabel = null);
+    private sealed record BingoSlotDefinition(
+        string Id,
+        string Text,
+        Func<UserAnswersState, bool> IsEligible,
+        string? PreferenceLabel = null,
+        bool IsAttendee = false);
 }
