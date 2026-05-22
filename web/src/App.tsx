@@ -278,7 +278,12 @@ export default function App() {
 
   const refreshUser = useCallback(async () => {
     const u = await userManager.getUser();
-    setUserLabel(u?.profile?.email ?? u?.profile?.name ?? u?.profile?.sub ?? null);
+    if (!u || u.expired) {
+      setUserLabel(null);
+      return;
+    }
+
+    setUserLabel(u.profile?.email ?? u.profile?.name ?? u.profile?.sub ?? null);
   }, []);
 
   const loadProtected = useCallback(async () => {
@@ -333,7 +338,7 @@ export default function App() {
   useEffect(() => {
     void refreshUser();
     void userManager.getUser().then((u) => {
-      if (!u) return;
+      if (!u || u.expired) return;
       if (isAdminRoute) void loadAdmin();
       else void loadProtected();
     });
